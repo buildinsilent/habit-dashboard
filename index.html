@@ -146,9 +146,18 @@
       const [workspaceKey, setWorkspaceKey] = useState(() => {
         return localStorage.getItem('exec_workspace_key') || 'love-executive-sync';
       });
-      const [firebaseConfigRaw, setFirebaseConfigRaw] = useState(() => {
-        return localStorage.getItem('exec_firebase_config') || '';
-      });
+ const BUILTIN_CONFIG = JSON.stringify({
+  apiKey: "AIzaSyAJF1ulKZgLp4u-HoALiPOMTkqVdCZ1ZAc",
+  authDomain: "habit-dashboard-268c2.firebaseapp.com",
+  projectId: "habit-dashboard-268c2",
+  storageBucket: "habit-dashboard-268c2.firebasestorage.app",
+  messagingSenderId: "427058501471",
+  appId: "1:427058501471:web:6c79c7db86b95dc41f48ea"
+});
+
+const [firebaseConfigRaw, setFirebaseConfigRaw] = useState(() => {
+  return localStorage.getItem('exec_firebase_config') || BUILTIN_CONFIG;
+});
       const [syncStatus, setSyncStatus] = useState('Local Only');
       const [syncError, setSyncError] = useState('');
 
