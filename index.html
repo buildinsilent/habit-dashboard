@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Executive Habit & Streak Dashboard</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- React & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel for in-browser JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Firebase Compat SDKs (Easy Single-File Cloud Sync) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+  <style>
+    body { background-color: #f8fafc; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  </style>
+</head>
+<body class="text-slate-900 antialiased">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const CATEGORIES = [
+      'Communication & Speaking',
+      'Leadership & Strategy',
+      'Wellness & Fitness'
+    ];
+
+    const CATEGORY_COLORS = {
+      'Communication & Speaking': 'bg-indigo-50 text-indigo-700 border-indigo-200',
+      'Leadership & Strategy': 'bg-amber-50 text-amber-700 border-amber-200',
+      'Wellness & Fitness': 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    };
+
+    const DEFAULT_HABITS = [
+      {
+        id: 'h1',
+        name: 'Vocal & Impromptu Speaking Drill (15m)',
+        category: 'Communication & Speaking',
+        target: 5,
+        carryOverStreak: 2,
+        checks: [true, true, true, false, false, false, false]
+      },
+      {
+        id: 'h2',
+        name: 'Podcast & Content Production Block',
+        category: 'Communication & Speaking',
+        target: 4,
+        carryOverStreak: 0,
+        checks: [true, false, true, false, false, false, false]
+      },
+      {
+        id: 'h3',
+        name: 'Division Strategic Priority Review',
+        category: 'Leadership & Strategy',
+        target: 5,
+        carryOverStreak: 4,
+        checks: [true, true, true, false, false, false, false]
+      },
+      {
+        id: 'h4',
+        name: 'Zero-Inbox & GTD Daily Triage',
+        category: 'Leadership & Strategy',
+        target: 5,
+        carryOverStreak: 1,
+        checks: [true, true, false, false, false, false, false]
+      },
+      {
+        id: 'h5',
+        name: 'Strength & Cardio Session (45m)',
+        category: 'Wellness & Fitness',
+        target: 4,
+        carryOverStreak: 0,
+        checks: [false, true, true, false, false, false, false]
+      }
+    ];
+
+    const DEFAULT_NOTES = {
+      Mon: 'Completed vocal warmups and outlined podcast script structure.',
+      Tue: 'Strong team alignment session; hit cardio intervals in the evening.',
+      Wed: '', Thu: '', Fri: '', Sat: '', Sun: ''
+    };
+
+    function calculateCurrentStreak(checks, carryOver = 0) {
+      let lastCheckedIdx = -1;
+      for (let i = checks.length - 1; i >= 0; i--) {
+        if (checks[i]) {
+          lastCheckedIdx = i;
+          break;
+        }
+      }
+      if (lastCheckedIdx === -1) return carryOver;
+
+      let consecutiveFromLast = 0;
+      let reachedMonday = false;
+      for (let i = lastCheckedIdx; i >= 0; i--) {
+        if (checks[i]) {
+          consecutiveFromLast++;
+          if (i === 0) reachedMonday = true;
+        } else {
+          break;
+        }
+      }
+      return reachedMonday ? consecutiveFromLast + carryOver : consecutiveFromLast;
+    }
+
+    function calculateEndOfWeekStreak(checks, carryOver = 0) {
+      let streak = 0;
+      for (let i = 6; i >= 0; i--) {
+        if (checks[i]) {
+          streak++;
+        } else {
+          break;
+        }
+      }
+      if (streak === 7) return 7 + carryOver;
+      return streak;
+    }
+
+    function App() {
+      const [habits, setHabits] = useState(() => {
+        const saved = localStorage.getItem('exec_habits_v2');
+        return saved ? JSON.parse(saved) : DEFAULT_HABITS;
+      });
+
+      const [notes, setNotes] = useState(() => {
+        const saved = localStorage.getItem('exec_notes_v2');
+        return saved ? JSON.parse(saved) : DEFAULT_NOTES;
+      });
+
+      const [weekLabel, setWeekLabel] = useState(() => {
+        return localStorage.getItem('exec_week_label') || 'Current Sprint Week';
+      });
+
+      const [activeDay, setActiveDay] = useState('Wed');
+
+      // Cloud Sync Settings
+      const [workspaceKey, setWorkspaceKey] = useState(() => {
+        return localStorage.getItem('exec_workspace_key') || 'love-executive-sync';
+      });
+      const [firebaseConfigRaw, setFirebaseConfigRaw] = useState(() => {
+        return localStorage.getItem('exec_firebase_config') || '';
+      });
+      const [syncStatus, setSyncStatus] = useState('Local Only');
+      const [syncError, setSyncError] = useState('');
+
+      // Modals
+      const [showHabitModal, setShowHabitModal] = useState(false);
+      const [editingHabit, setEditingHabit] = useState(null);
+      const [showNewWeekModal, setShowNewWeekModal] = useState(false);
+      const [showCloudModal, setShowCloudModal] = useState(false);
+
+      // Form State
+      const [formName, setFormName] = useState('');
+      const [formCategory, setFormCategory] = useState(CATEGORIES[0]);
+      const [formTarget, setFormTarget] = useState(5);
+      const [formCarryOver, setFormCarryOver] = useState(0);
+
+      const dbRef = useRef(null);
+      const isRemoteUpdate = useRef(false);
+
+      // Save to LocalStorage always as fallback
+      useEffect(() => {
+        localStorage.setItem('exec_habits_v2', JSON.stringify(habits));
+        localStorage.setItem('exec_notes_v2', JSON.stringify(notes));
+        localStorage.setItem('exec_week_label', weekLabel);
+      }, [habits, notes, weekLabel]);
+
+      // Initialize Firebase & Real-Time Listener
+      useEffect(() => {
+        if (!firebaseConfigRaw.trim()) {
+          setSyncStatus('Local Only');
+          dbRef.current = null;
+          return;
+        }
+
+        try {
+          let cleaned = firebaseConfigRaw.trim();
+          const firstBrace = cleaned.indexOf('{');
+          const lastBrace = cleaned.lastIndexOf('}');
+          if (firstBrace !== -1 && lastBrace !== -1) {
+            cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+          }
+          const jsonReady = cleaned
+            .replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
+            .replace(/'/g, '"')
+            .replace(/,\s*}/g, '}');
+
+          const configObj = JSON.parse(jsonReady);
+
+          if (!firebase.apps.length) {
+            firebase.initializeApp(configObj);
+          }
+          const auth = firebase.auth();
+          const db = firebase.firestore();
+          dbRef.current = db;
+
+          setSyncStatus('Connecting...');
+          setSyncError('');
+
+          let unsubscribe = null;
+
+          auth.signInAnonymously()
+            .then(() => {
+              const docRef = db.collection('habitWorkspaces').doc(workspaceKey.trim() || 'default');
+              unsubscribe = docRef.onSnapshot(
+                (docSnap) => {
+                  setSyncStatus('Cloud Synced');
+                  if (docSnap.exists) {
+                    const data = docSnap.data();
+                    isRemoteUpdate.current = true;
+                    if (data.habits) setHabits(data.habits);
+                    if (data.notes) setNotes(data.notes);
+                    if (data.weekLabel) setWeekLabel(data.weekLabel);
+                    setTimeout(() => { isRemoteUpdate.current = false; }, 150);
+                  } else {
+                    docRef.set({
+                      habits,
+                      notes,
+                      weekLabel,
+                      updatedAt: new Date().toISOString()
+                    });
+                  }
+                },
+                (err) => {
+                  setSyncStatus('Sync Error');
+                  setSyncError(err.message);
+                }
+              );
+            })
+            .catch((err) => {
+              setSyncStatus('Auth Error');
+              setSyncError(err.message);
+            });
+
+          return () => {
+            if (unsubscribe) unsubscribe();
+          };
+        } catch (err) {
+          setSyncStatus('Config Error');
+          setSyncError('Could not parse Firebase config. Make sure you copied from { to }.');
+        }
+      }, [firebaseConfigRaw, workspaceKey]);
+
+      const pushToCloud = (nextHabits, nextNotes, nextWeekLabel) => {
+        if (!dbRef.current || isRemoteUpdate.current) return;
+        const docRef = dbRef.current.collection('habitWorkspaces').doc(workspaceKey.trim() || 'default');
+        docRef.set({
+          habits: nextHabits,
+          notes: nextNotes,
+          weekLabel: nextWeekLabel,
+          updatedAt: new Date().toISOString()
+        }, { merge: true }).catch((err) => {
+          setSyncStatus('Sync Error');
+          setSyncError(err.message);
+        });
+      };
+
+      const toggleCheck = (habitId, dayIdx) => {
+        const updated = habits.map(h => {
+          if (h.id !== habitId) return h;
+          const nextChecks = [...h.checks];
+          nextChecks[dayIdx] = !nextChecks[dayIdx];
+          return { ...h, checks: nextChecks };
+        });
+        setHabits(updated);
+        pushToCloud(updated, notes, weekLabel);
+      };
+
+      const handleNoteChange = (val) => {
+        const updatedNotes = { ...notes, [activeDay]: val };
+        setNotes(updatedNotes);
+        pushToCloud(habits, updatedNotes, weekLabel);
+      };
+
+      const openAddModal = () => {
+        setEditingHabit(null);
+        setFormName('');
+        setFormCategory(CATEGORIES[0]);
+        setFormTarget(5);
+        setFormCarryOver(0);
+        setShowHabitModal(true);
+      };
+
+      const openEditModal = (habit) => {
+        setEditingHabit(habit);
+        setFormName(habit.name);
+        setFormCategory(habit.category);
+        setFormTarget(habit.target);
+        setFormCarryOver(habit.carryOverStreak || 0);
+        setShowHabitModal(true);
+      };
+
+      const saveHabitForm = (e) => {
+        e.preventDefault();
+        if (!formName.trim()) return;
+        let updated;
+        if (editingHabit) {
+          updated = habits.map(h =>
+            h.id === editingHabit.id
+              ? { ...h, name: formName.trim(), category: formCategory, target: Number(formTarget), carryOverStreak: Number(formCarryOver) }
+              : h
+          );
+        } else {
+          const newHabit = {
+            id: 'h_' + Date.now(),
+            name: formName.trim(),
+            category: formCategory,
+            target: Number(formTarget),
+            carryOverStreak: Number(formCarryOver),
+            checks: [false, false, false, false, false, false, false]
+          };
+          updated = [...habits, newHabit];
+        }
+        setHabits(updated);
+        pushToCloud(updated, notes, weekLabel);
+        setShowHabitModal(false);
+      };
+
+      const deleteHabit = (id) => {
+        const updated = habits.filter(h => h.id !== id);
+        setHabits(updated);
+        pushToCloud(updated, notes, weekLabel);
+      };
+
+      const handleStartNewWeek = () => {
+        const rolledHabits = habits.map(h => ({
+          ...h,
+          carryOverStreak: calculateEndOfWeekStreak(h.checks, h.carryOverStreak || 0),
+          checks: [false, false, false, false, false, false, false]
+        }));
+        const emptyNotes = { Mon: '', Tue: '', Wed: '', Thu: '', Fri: '', Sat: '', Sun: '' };
+        setHabits(rolledHabits);
+        setNotes(emptyNotes);
+        pushToCloud(rolledHabits, emptyNotes, weekLabel);
+        setShowNewWeekModal(false);
+      };
+
+      const exportMarkdown = () => {
+        const lines = [
+          `# Executive Habit Summary (${weekLabel})`,
+          ``,
+          `## Habit Performance`,
+          ...habits.map(h => {
+            const done = h.checks.filter(Boolean).length;
+            const streak = calculateCurrentStreak(h.checks, h.carryOverStreak);
+            return `- **${h.name}** (${h.category}):${done}/${h.target} days completed \vert{} Active Streak:${streak}d`;
+          }),
+          ``,
+          `## Daily Reflection Log`,
+          ...DAYS.map(d => `- **${d}**: ${notes[d] || 'No entry'}`)
+        ];
+        const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `habit-summary-${Date.now()}.md`;
+        a.click();
+      };
+
+      const activeDayIdx = DAYS.indexOf(activeDay);
+      const todayCompleted = habits.filter(h => h.checks[activeDayIdx]).length;
+      const todayRate = habits.length ? Math.round((todayCompleted / habits.length) * 100) : 0;
+
+      const activeStreaksCount = habits.filter(h => calculateCurrentStreak(h.checks, h.carryOverStreak) >= 2).length;
+      const longestStreak = habits.reduce((max, h) => Math.max(max, calculateCurrentStreak(h.checks, h.carryOverStreak)), 0);
+
+      const totalCheckIns = habits.reduce((sum, h) => sum + h.checks.filter(Boolean).length, 0);
+      const totalWeeklyTarget = habits.reduce((sum, h) => sum + Number(h.target || 1), 0);
+      const weeklyTargetPct = totalWeeklyTarget ? Math.round((totalCheckIns / totalWeeklyTarget) * 100) : 0;
+
+      const dailyChartData = DAYS.map((day, idx) => {
+        const count = habits.filter(h => h.checks[idx]).length;
+        const pct = habits.length ? Math.round((count / habits.length) * 100) : 0;
+        return { day, count, pct };
+      });
+
+      return (
+        <div className="max-w-7xl mx-auto p-4 md:p-6 space-y-6">
+          <header className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2.5">
+                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-600 text-white">
+                  EXECUTIVE TRACKER
+                </span>
+                <input
+                  type="text"
+                  value={weekLabel}
+                  onChange={(e) => {
+                    setWeekLabel(e.target.value);
+                    pushToCloud(habits, notes, e.target.value);
+                  }}
+                  className="text-xs font-medium text-slate-600 bg-slate-100 px-2.5 py-1 rounded-md border border-transparent hover:border-slate-300 focus:border-indigo-500 focus:bg-white focus:outline-none"
+                  title="Click to rename current week"
+                />
+              </div>
+              <h1 className="text-2xl font-bold text-slate-900 mt-1">
+                Habit & Weekly Streak Dashboard
+              </h1>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                onClick={() => setShowCloudModal(true)}
+                className={`px-3.5 py-2 rounded-xl text-xs font-semibold border flex items-center gap-2 transition ${
+                  syncStatus === 'Cloud Synced'
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                    : syncStatus.includes('Error')
+                    ? 'bg-rose-50 text-rose-700 border-rose-200'
+                    : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full ${
+                  syncStatus === 'Cloud Synced' ? 'bg-emerald-500' : syncStatus.includes('Error') ? 'bg-rose-500' : 'bg-amber-500'
+                }`} />
+                {syncStatus} • Configure Sync
+              </button>
+
+              <button
+                onClick={() => setShowNewWeekModal(true)}
+                className="px-3.5 py-2 rounded-xl text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition"
+              >
+                Start New Week
+              </button>
+
+              <button
+                onClick={openAddModal}
+                className="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm transition"
+              >
+                + Add Habit
+              </button>
+            </div>
+          </header>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                {activeDay} Completion Rate
+              </p>
+              <div className="mt-2 flex items-baseline justify-between">
+                <span className="text-2xl font-bold text-slate-900">{todayRate}%</span>
+                <span className="text-xs font-medium text-slate-500">
+                  {todayCompleted} of {habits.length} habits
+                </span>
+              </div>
+              <div className="mt-2 w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                <div className="bg-indigo-600 h-full transition-all duration-300" style={{ width: `${todayRate}%` }} />
+              </div>
+            </div>
+
+            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Active Streaks (2+ Days)
+              </p>
+              <div className="mt-2 flex items-baseline justify-between">
+                <span className="text-2xl font-bold text-slate-900">{activeStreaksCount} Active</span>
+                <span className="text-xs font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">
+                  Best: {longestStreak}d 🔥
+                </span>
+              </div>
+              <p className="mt-2 text-xs text-slate-500">Includes multi-week rollover streaks</p>
+            </div>
+
+            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Weekly Goal Execution
+              </p>
+              <div className="mt-2 flex items-baseline justify-between">
+                <span className="text-2xl font-bold text-slate-900">{weeklyTargetPct}%</span>
+                <span className="text-xs font-medium text-slate-500">
+                  {totalCheckIns} / {totalWeeklyTarget} check-ins
+                </span>
+              </div>
+              <div className="mt-2 w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                <div className="bg-emerald-500 h-full transition-all duration-300" style={{ width: `${Math.min(100, weeklyTargetPct)}%` }} />
+              </div>
+            </div>
+
+            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Quick Export
+              </p>
+              <div className="mt-2">
+                <button
+                  onClick={exportMarkdown}
+                  className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl transition"
+                >
+                  Download Weekly Summary (.md)
+                </button>
+              </div>
+              <p className="mt-2 text-[11px] text-slate-400">Ready to paste into Notion archives</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900">Weekly Execution Matrix</h2>
+                  <p className="text-xs text-slate-500">Click any day cell to log progress or click a day header to switch reflection notes</p>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-100 bg-slate-50/70 text-[11px] font-semibold uppercase text-slate-500">
+                      <th className="py-3 px-4 min-w-[210px]">Habit & Category</th>
+                      {DAYS.map(day => (
+                        <th key={day} className="py-2.5 px-1.5 text-center">
+                          <button
+                            onClick={() => setActiveDay(day)}
+                            className={`px-2 py-1 rounded-lg transition ${
+                              activeDay === day
+                                ? 'bg-indigo-600 text-white font-bold'
+                                : 'hover:bg-slate-200 text-slate-600'
+                            }`}
+                          >
+                            {day}
+                          </button>
+                        </th>
+                      ))}
+                      <th className="py-3 px-3 text-center">Goal</th>
+                      <th className="py-3 px-3 text-center">Streak</th>
+                      <th className="py-3 px-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-sm">
+                    {habits.map(habit => {
+                      const weeklyDone = habit.checks.filter(Boolean).length;
+                      const streak = calculateCurrentStreak(habit.checks, habit.carryOverStreak);
+                      const goalMet = weeklyDone >= habit.target;
+
+                      return (
+                        <tr key={habit.id} className="hover:bg-slate-50/80 transition">
+                          <td className="py-3 px-4">
+                            <div className="font-semibold text-slate-800">{habit.name}</div>
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className={`text-[10px] px-2 py-0.5 rounded-full border font-medium ${CATEGORY_COLORS[habit.category] || 'bg-slate-100 text-slate-600'}`}>
+                                {habit.category}
+                              </span>
+                              {habit.carryOverStreak > 0 && (
+                                <span className="text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded font-medium">
+                                  +{habit.carryOverStreak}d prior
+                                </span>
+                              )}
+                            </div>
+                          </td>
+
+                          {habit.checks.map((checked, idx) => (
+                            <td key={idx} className="py-2.5 px-1.5 text-center">
+                              <button
+                                onClick={() => toggleCheck(habit.id, idx)}
+                                className={`w-8 h-8 rounded-xl font-bold text-xs transition inline-flex items-center justify-center border ${
+                                  checked
+                                    ? 'bg-emerald-500 border-emerald-600 text-white shadow-sm'
+                                    : 'bg-slate-50 border-slate-200 text-transparent hover:border-indigo-400'
+                                }`}
+                              >
+                                ✓
+                              </button>
+                            </td>
+                          ))}
+
+                          <td className="py-3 px-3 text-center">
+                            <span className={`text-xs font-bold px-2 py-1 rounded-lg ${
+                              goalMet ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 bg-slate-100'
+                            }`}>
+                              {weeklyDone}/{habit.target}
+                            </span>
+                          </td>
+
+                          <td className="py-3 px-3 text-center">
+                            <span className={`text-xs font-bold px-2 py-1 rounded-lg ${
+                              streak >= 3 ? 'bg-amber-50 text-amber-700' : 'text-slate-500'
+                            }`}>
+                              {streak}d {streak >= 3 ? '🔥' : ''}
+                            </span>
+                          </td>
+
+                          <td className="py-3 px-3 text-right whitespace-nowrap">
+                            <button
+                              onClick={() => openEditModal(habit)}
+                              className="text-xs text-slate-400 hover:text-indigo-600 px-1.5 py-1"
+                              title="Edit Habit"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => deleteHabit(habit.id)}
+                              className="text-xs text-slate-400 hover:text-rose-600 px-1.5 py-1"
+                              title="Delete Habit"
+                            >
+                              Del
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                <h3 className="text-sm font-bold text-slate-900">Weekly Consistency Chart</h3>
+                <p className="text-xs text-slate-500 mb-4">Daily completion percentage (Mon–Sun)</p>
+
+                <div className="h-40 flex items-end justify-between gap-2 pt-4 px-1 border-b border-slate-100">
+                  {dailyChartData.map(item => (
+                    <div key={item.day} className="flex-1 flex flex-col items-center gap-1.5">
+                      <span className="text-[10px] font-bold text-slate-600">{item.pct}%</span>
+                      <div className="w-full bg-slate-100 rounded-t-lg h-24 flex items-end overflow-hidden">
+                        <div
+                          className={`w-full transition-all duration-300 rounded-t-lg ${
+                            item.pct >= 80 ? 'bg-emerald-500' : item.pct >= 40 ? 'bg-indigo-500' : 'bg-slate-300'
+                          }`}
+                          style={{ height: `${Math.max(item.pct, 6)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex justify-between px-1 pt-2">
+                  {dailyChartData.map(item => (
+                    <button
+                      key={item.day}
+                      onClick={() => setActiveDay(item.day)}
+                      className={`flex-1 text-center text-xs font-semibold py-0.5 rounded ${
+                        activeDay === item.day ? 'text-indigo-600 font-bold' : 'text-slate-500'
+                      }`}
+                    >
+                      {item.day}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Daily Executive Log ({activeDay})
+                  </h3>
+                  <div className="flex gap-1">
+                    {DAYS.map(d => (
+                      <button
+                        key={d}
+                        onClick={() => setActiveDay(d)}
+                        className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                          activeDay === d ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'
+                        }`}
+                      >
+                        {d[0]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <textarea
+                  rows="4"
+                  value={notes[activeDay] || ''}
+                  onChange={(e) => handleNoteChange(e.target.value)}
+                  placeholder={`Capture key wins, speaking notes, or adjustments for ${activeDay}...`}
+                  className="w-full text-xs p-3 rounded-xl border border-slate-200 focus:border-indigo-500 focus:outline-none bg-slate-50/50"
+                />
+              </div>
+            </div>
+          </div>
+
+          {showHabitModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+              <form onSubmit={saveHabitForm} className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl">
+                <h3 className="text-lg font-bold text-slate-900">
+                  {editingHabit ? 'Edit Habit' : 'Add New Habit'}
+                </h3>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Habit Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={formName}
+                    onChange={(e) => setFormName(e.target.value)}
+                    placeholder="e.g., 15m Vocal Warmup & Story Drill"
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-600"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Category</label>
+                  <select
+                    value={formCategory}
+                    onChange={(e) => setFormCategory(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-600"
+                  >
+                    {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Weekly Target (1-7)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="7"
+                      value={formTarget}
+                      onChange={(e) => setFormTarget(e.target.value)}
+                      className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Prior Streak Carry-Over</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={formCarryOver}
+                      onChange={(e) => setFormCarryOver(e.target.value)}
+                      className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowHabitModal(false)}
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 rounded-xl"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700"
+                  >
+                    Save Habit
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {showNewWeekModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl">
+                <h3 className="text-lg font-bold text-slate-900">Start New Sprint Week?</h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  This will clear Monday–Sunday checkmarks and reflection logs for a fresh week, while rolling over any active end-of-week streaks into your <strong>Prior Streak Carry-Over</strong> counter.
+                </p>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    onClick={() => setShowNewWeekModal(false)}
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 rounded-xl"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleStartNewWeek}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-amber-600 rounded-xl hover:bg-amber-700"
+                  >
+                    Roll Over Streaks & Reset Week
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showCloudModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+              <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-xl">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-900">Personal Cloud Sync Setup</h3>
+                  <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700">
+                    Status: {syncStatus}
+                  </span>
+                </div>
+
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Paste your Firebase Web App configuration object below and set a secret Workspace Key. Use the exact same config and Workspace Key on both your laptop and phone inside Notion to sync automatically in real time.
+                </p>
+
+                {syncError && (
+                  <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700">
+                    {syncError}
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    1. Sync Workspace Key (Use the same key on Laptop & Phone)
+                  </label>
+                  <input
+                    type="text"
+                    value={workspaceKey}
+                    onChange={(e) => {
+                      setWorkspaceKey(e.target.value);
+                      localStorage.setItem('exec_workspace_key', e.target.value);
+                    }}
+                    placeholder="e.g., love-ravina-2026"
+                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    2. Firebase Config Object (Paste from `{` to `}`)
+                  </label>
+                  <textarea
+                    rows="6"
+                    value={firebaseConfigRaw}
+                    onChange={(e) => {
+                      setFirebaseConfigRaw(e.target.value);
+                      localStorage.setItem('exec_firebase_config', e.target.value);
+                    }}
+                    placeholder={'{\n  "apiKey": "AIzaSy...",\n  "authDomain": "your-app.firebaseapp.com",\n  "projectId": "your-app"\n}'}
+                    className="w-full p-3 text-xs border border-slate-200 rounded-xl font-mono bg-slate-50"
+                  />
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    onClick={() => setShowCloudModal(false)}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700"
+                  >
+                    Save & Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
